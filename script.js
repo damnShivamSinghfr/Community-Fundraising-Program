@@ -1,0 +1,229 @@
+/* ---------- Data layer (localStorage with in-memory fallback) ---------- */
+var KEY = "cftp_v1", ADMIN_PASS = "admin123", mem = null;
+var today = function(){ return new Date().toISOString().slice(0,10); };
+function seed(){
+  return {admin:false, audit:[{t:new Date().toLocaleString(), msg:"Portal initialised with sample data"}], campaigns:[
+    {id:"c1", title:"Rebuild the Ward 7 community library roof", desc:"Monsoon damage has closed the reading room. Funds go to roofing material and labour only.", goal:80000, deadline:"2026-12-31", organizer:"Ward 7 Residents Association", status:"verified", created:"2026-10-02",
+     donations:[{name:"Anita Sharma",amt:5000,anon:false,date:"2026-10-05"},{name:"Anonymous",amt:2000,anon:true,date:"2026-10-07"},{name:"Ravi Verma",amt:10000,anon:false,date:"2026-10-12"},{name:"Local Traders Group",amt:25000,anon:false,date:"2026-10-20"}],
+     updates:[{text:"Roof inspection completed. Quotation from two contractors received.",date:"2026-10-08"},{text:"Material purchased. Work starts Monday.",date:"2026-10-22"}],
+     expenses:[{item:"Roofing sheets (120 pcs)",amt:21000,date:"2026-10-21",status:"verified"},{item:"Labour advance",amt:8000,date:"2026-10-24",status:"pending"}]},
+    {id:"c2", title:"Medical help for a neighbour’s surgery", desc:"Family of a local shopkeeper needs support for a planned heart surgery. Hospital estimate is attached with the admin.", goal:150000, deadline:"2026-11-30", organizer:"Mohalla Seva Committee", status:"verified", created:"2026-10-15",
+     donations:[{name:"Sunita Devi",amt:3000,anon:false,date:"2026-10-16"},{name:"Anonymous",amt:15000,anon:true,date:"2026-10-18"}],
+     updates:[{text:"Hospital estimate verified by committee members.",date:"2026-10-17"}],
+     expenses:[]},
+    {id:"c3", title:"Park cleanup and tree plantation drive", desc:"Saplings, gloves and bags for a weekend volunteer drive.", goal:20000, deadline:"2026-12-15", organizer:"Green Youth Club", status:"pending", created:"2026-11-05", donations:[], updates:[], expenses:[]}
+  ]};
+}
+function load(){
+  try{ var r = localStorage.getItem(KEY); if(r) return JSON.parse(r); }catch(e){}
+  return mem || (mem = seed());
+}
+var S = load();
+function save(){ mem = S; try{ localStorage.setItem(KEY, JSON.stringify(S)); }catch(e){} }
+function log(msg){ S.audit.unshift({t:new Date().toLocaleString(), msg:msg}); }
+
+/* ---------- Helpers ---------- */
+function esc(s){ return String(s).replace(/[&<>"']/g, function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+function inr(n){ return "₹" + Number(n).toLocaleString("en-IN"); }
+function sum(a, f){ return a.reduce(function(t,x){ return t + (f ? f(x) : x.amt); }, 0); }
+function raised(c){ return sum(c.donations); }
+function spentV(c){ return sum(c.expenses.filter(function(e){ return e.status==="verified"; })); }
+function pct(a,b){ return Math.min(100, Math.round(a/b*100)); }
+function toast(m){ var t=document.getElementById("toast"); t.textContent=m; t.style.display="block"; clearTimeout(t._h); t._h=setTimeout(function(){ t.style.display="none"; },2500); }
+function find(id){ return S.campaigns.filter(function(c){ return c.id===id; })[0]; }
+function badge(s){ return '<span class="badge '+s+'">'+(s==="verified"?"Verified":s==="pending"?"Awaiting verification":"Rejected")+'</span>'; }
+function daysLeft(d){ var n=Math.ceil((new Date(d)-new Date(today()))/864e5); return n<0?"Ended":n+" days left"; }
+function bar(c){
+  var r=raised(c), s=spentV(c);
+  return '<div class="bar" title="Raised vs spent"><i style="width:'+pct(r,c.goal)+'%"></i><b style="width:'+pct(s,c.goal)+'%"></b></div>';
+}
+
+/* ---------- Views ---------- */
+function nav(route){
+  var l=[["home","Campaigns"],["new","Start a campaign"],["charts","Charts"],["admin","Admin"]];
+  document.getElementById("nav").innerHTML = l.map(function(x){
+    return '<a href="#'+x[0]+'" class="'+(route===x[0]?"on":"")+'">'+x[1]+'</a>';
+  }).join("") + (S.admin ? '<button onclick="logout()">Log out admin</button>' : "");
+}
+
+var filt = {q:"", st:"all"};
+function home(){
+  var list = S.campaigns.filter(function(c){
+    if(c.status==="rejected" && !S.admin) return false;
+    var okq = (c.title+c.organizer).toLowerCase().indexOf(filt.q.toLowerCase())>-1;
+    var oks = filt.st==="all" || c.status===filt.st;
+    return okq && oks;
+  });
+  var tr = sum(S.campaigns, raised), tv = sum(S.campaigns, spentV);
+  var h = '<h2>Every rupee, in public view</h2><p class="sub">Browse campaigns, see who gave, what was spent, and what the admin has verified.</p>'
+   + '<div class="stats"><div><strong>'+S.campaigns.length+'</strong>campaigns</div><div><strong>'+inr(tr)+'</strong>raised in total</div><div><strong>'+inr(tv)+'</strong>spent and verified</div></div>'
+   + '<div class="tools"><input id="q" placeholder="Search by title or organizer" value="'+esc(filt.q)+'" oninput="filt.q=this.value;list()">'
+   + '<select onchange="filt.st=this.value;list()"><option value="all">All statuses</option><option value="verified"'+(filt.st==="verified"?" selected":"")+'>Verified</option><option value="pending"'+(filt.st==="pending"?" selected":"")+'>Awaiting verification</option></select><button class="btn sm alt" onclick="exportCSV()">Export all donations (CSV)</button></div>'
+   + '<div class="legend" style="margin-bottom:12px"><span style="--c:var(--raised)">Raised</span><span style="--c:var(--spent)">Spent (verified)</span></div>'
+   + '<div id="list"></div>';
+  return h;
+}
+function list(){
+  var el=document.getElementById("list"); if(!el) return;
+  var items = S.campaigns.filter(function(c){
+    if(c.status==="rejected" && !S.admin) return false;
+    return (c.title+c.organizer).toLowerCase().indexOf(filt.q.toLowerCase())>-1 && (filt.st==="all"||c.status===filt.st);
+  });
+  if(!items.length){ el.innerHTML='<div class="empty">No campaigns match. Clear the search or <a href="#new">start a campaign</a>.</div>'; return; }
+  el.innerHTML = '<div class="grid">'+items.map(function(c){
+    return '<a class="card link" href="#'+c.id+'"><div class="row"><span class="mute">'+esc(c.organizer)+'</span>'+badge(c.status)+'</div>'
+     +'<h3 style="margin-top:8px">'+esc(c.title)+'</h3>'+bar(c)
+     +'<div class="row"><strong>'+inr(raised(c))+'</strong><span class="mute">of '+inr(c.goal)+' ('+pct(raised(c),c.goal)+'%)</span></div>'
+     +'<div class="mute">'+c.donations.length+' donations · '+daysLeft(c.deadline)+'</div></a>';
+  }).join("")+'</div>';
+}
+
+function newForm(){
+  return '<h2>Start a campaign</h2><p class="sub">Your campaign appears publicly as “Awaiting verification” until an admin approves it.</p>'
+   + '<div class="card" style="max-width:620px"><label for="t">Campaign title</label><input id="t" maxlength="90">'
+   + '<label for="o">Organizer or group name</label><input id="o">'
+   + '<label for="d">What is the money for?</label><textarea id="d" rows="4"></textarea>'
+   + '<label for="g">Target amount (₹)</label><input id="g" type="number" min="100">'
+   + '<label for="dl">Deadline</label><input id="dl" type="date" min="'+today()+'">'
+   + '<button class="btn" onclick="createC()">Submit for verification</button></div>';
+}
+function createC(){
+  var v=function(i){ return document.getElementById(i).value.trim(); };
+  var t=v("t"),o=v("o"),d=v("d"),g=Number(v("g")),dl=v("dl");
+  if(!t||!o||!d||!dl) return toast("Fill in every field.");
+  if(!(g>=100)) return toast("Target must be at least ₹100.");
+  if(dl<today()) return toast("Deadline cannot be in the past.");
+  var id="c"+Date.now();
+  S.campaigns.unshift({id:id,title:t,desc:d,goal:g,deadline:dl,organizer:o,status:"pending",created:today(),donations:[],updates:[],expenses:[]});
+  log("Campaign created: “"+t+"” by "+o); save(); toast("Submitted. Waiting for admin verification."); location.hash=id;
+}
+
+function detail(c){
+  var r=raised(c), s=spentV(c), pend=sum(c.expenses.filter(function(e){return e.status==="pending";}));
+  var canDonate = c.status==="verified" && daysLeft(c.deadline)!=="Ended";
+  var h='<p><a href="#home">← All campaigns</a></p><div class="row"><h2>'+esc(c.title)+'</h2>'+badge(c.status)+'</div>'
+   +'<p class="sub">Organized by '+esc(c.organizer)+' · Started '+c.created+' · '+daysLeft(c.deadline)+'</p>'
+   +'<div class="two"><div>'
+   +'<div class="card"><p style="margin-top:0">'+esc(c.desc)+'</p>'+bar(c)
+   +'<div class="stats"><div><strong>'+inr(r)+'</strong>raised of '+inr(c.goal)+'</div><div><strong>'+inr(s)+'</strong>spent (verified)</div><div><strong>'+inr(r-s)+'</strong>balance in hand</div></div>'
+   +(pend?'<p class="mute">'+inr(pend)+' in expenses is waiting for admin verification and is not counted above.</p>':'')+'</div>'
+   // updates
+   +'<div class="card" style="margin-top:16px"><h3>Updates</h3>'
+   +(c.updates.length?c.updates.map(function(u){return '<div class="upd"><div class="mute">'+u.date+'</div>'+esc(u.text)+'</div>';}).join(""):'<p class="mute">No updates yet.</p>')
+   +'<label for="ut">Post an update</label><textarea id="ut" rows="2"></textarea><button class="btn sm" style="margin-top:8px" onclick="addUpd(\''+c.id+'\')">Post update</button></div>'
+   // expenses
+   +'<div class="card" style="margin-top:16px"><h3>Expense report</h3><div class="tw">'
+   +(c.expenses.length?'<table><tr><th>Date</th><th>Item</th><th class="n">Amount</th><th>Status</th>'+(S.admin?'<th></th>':'')+'</tr>'
+     +c.expenses.map(function(e,i){return '<tr><td>'+e.date+'</td><td>'+esc(e.item)+'</td><td class="n">'+inr(e.amt)+'</td><td>'+badge(e.status)+'</td>'
+       +(S.admin?'<td>'+(e.status==="pending"?'<button class="btn sm" onclick="verExp(\''+c.id+'\','+i+')">Verify</button>':'')+'</td>':'')+'</tr>';}).join("")+'</table>'
+    :'<p class="mute">No expenses recorded yet.</p>')
+   +'</div><div class="row" style="gap:8px"><div style="flex:2;min-width:150px"><label for="ei">Item</label><input id="ei"></div><div style="flex:1;min-width:100px"><label for="ea">Amount (₹)</label><input id="ea" type="number" min="1"></div></div>'
+   +'<button class="btn sm" style="margin-top:10px" onclick="addExp(\''+c.id+'\')">Add expense</button></div>'
+   +'</div><div>'
+   // donate
+   +'<div class="card"><h3>Donate</h3>'
+   +(canDonate?'<label for="dn">Your name</label><input id="dn"><label for="da">Amount (₹)</label><input id="da" type="number" min="1">'
+     +'<label class="chk"><input type="checkbox" id="dan">Show me as anonymous</label><button class="btn" onclick="donate(\''+c.id+'\')">Donate now</button>'
+     +'<p class="mute">Demo only: no real payment is taken.</p>'
+    :'<p class="mute">'+(c.status!=="verified"?'Donations open after admin verification.':'This campaign has ended.')+'</p>')
+   +'</div>'
+   // donors
+   +'<div class="card" style="margin-top:16px"><div class="row"><h3>Donor history</h3><button class="btn sm alt" onclick="exportCSV(\''+c.id+'\')">Export CSV</button></div>'
+   +(c.donations.length?'<table>'+c.donations.slice().reverse().map(function(d){return '<tr><td>'+esc(d.anon?"Anonymous":d.name)+'<div class="mute">'+d.date+'</div></td><td class="n">'+inr(d.amt)+'</td></tr>';}).join("")+'</table>':'<p class="mute">Be the first to donate.</p>')
+   +'</div></div></div>';
+  return h;
+}
+function donate(id){
+  var c=find(id), n=document.getElementById("dn").value.trim(), a=Number(document.getElementById("da").value), an=document.getElementById("dan").checked;
+  if(!n) return toast("Enter your name."); if(!(a>=1)) return toast("Enter an amount of at least ₹1.");
+  c.donations.push({name:n,amt:a,anon:an,date:today()});
+  log("Donation of "+inr(a)+" to “"+c.title+"” from "+(an?"an anonymous donor":n)); save(); toast("Thank you. Donation recorded."); route();
+}
+function addUpd(id){
+  var c=find(id), t=document.getElementById("ut").value.trim(); if(!t) return toast("Write the update first.");
+  c.updates.push({text:t,date:today()}); log("Update posted on “"+c.title+"”"); save(); toast("Update posted."); route();
+}
+function addExp(id){
+  var c=find(id), i=document.getElementById("ei").value.trim(), a=Number(document.getElementById("ea").value);
+  if(!i||!(a>=1)) return toast("Enter an item and an amount.");
+  if(spentV(c)+sum(c.expenses.filter(function(e){return e.status==="pending";}))+a > raised(c)) return toast("Expenses cannot exceed the money raised.");
+  c.expenses.push({item:i,amt:a,date:today(),status:"pending"}); log("Expense "+inr(a)+" ("+i+") submitted on “"+c.title+"”"); save(); toast("Expense submitted for verification."); route();
+}
+
+/* ---------- Admin ---------- */
+function admin(){
+  if(!S.admin) return '<h2>Admin login</h2><p class="sub">Verify campaigns and expenses, and review the audit trail.</p><div class="card" style="max-width:380px"><label for="pw">Password</label><input id="pw" type="password" onkeydown="if(event.key===\'Enter\')login()"><button class="btn" onclick="login()">Log in</button><p class="mute">Demo password: admin123</p></div>';
+  var pend=S.campaigns.filter(function(c){return c.status==="pending";});
+  var pe=[]; S.campaigns.forEach(function(c){ c.expenses.forEach(function(e,i){ if(e.status==="pending") pe.push([c,e,i]); }); });
+  return '<h2>Admin panel</h2><p class="sub">Nothing becomes public as “verified” without a decision here, and every decision is logged.</p>'
+   +'<div class="card"><h3>Campaigns waiting for review ('+pend.length+')</h3>'
+   +(pend.length?pend.map(function(c){return '<div class="row" style="padding:8px 0;border-bottom:1px solid var(--line)"><div><a href="#'+c.id+'">'+esc(c.title)+'</a><div class="mute">'+esc(c.organizer)+' · target '+inr(c.goal)+'</div></div><div><button class="btn sm" onclick="decide(\''+c.id+'\',\'verified\')">Verify</button> <button class="btn sm red" onclick="decide(\''+c.id+'\',\'rejected\')">Reject</button></div></div>';}).join(""):'<p class="mute">All caught up.</p>')+'</div>'
+   +'<div class="card" style="margin-top:16px"><h3>Expenses waiting for review ('+pe.length+')</h3>'
+   +(pe.length?pe.map(function(x){return '<div class="row" style="padding:8px 0;border-bottom:1px solid var(--line)"><div>'+esc(x[1].item)+' · '+inr(x[1].amt)+'<div class="mute">'+esc(x[0].title)+'</div></div><button class="btn sm" onclick="verExp(\''+x[0].id+'\','+x[2]+')">Verify</button></div>';}).join(""):'<p class="mute">No pending expenses.</p>')+'</div>'
+   +'<div class="card" style="margin-top:16px"><div class="row"><h3>Audit trail</h3><button class="btn sm alt" onclick="resetAll()">Reset demo data</button></div><div class="tw"><table><tr><th>Time</th><th>Action</th></tr>'
+   +S.audit.slice(0,50).map(function(a){return '<tr><td style="white-space:nowrap">'+esc(a.t)+'</td><td>'+esc(a.msg)+'</td></tr>';}).join("")+'</table></div></div>';
+}
+function login(){ if(document.getElementById("pw").value===ADMIN_PASS){ S.admin=true; log("Admin logged in"); save(); route(); } else toast("Wrong password."); }
+function logout(){ S.admin=false; save(); location.hash="home"; route(); }
+function decide(id,st){ var c=find(id); c.status=st; log("Campaign “"+c.title+"” "+st); save(); toast("Campaign "+st+"."); route(); }
+function verExp(id,i){ var c=find(id), e=c.expenses[i]; e.status="verified"; log("Expense “"+e.item+"” ("+inr(e.amt)+") verified on “"+c.title+"”"); save(); toast("Expense verified."); route(); }
+function resetAll(){ if(confirm("Reset all data to the sample set?")){ S=seed(); save(); route(); } }
+
+
+/* ---------- CSV export ---------- */
+function csvCell(v){ v=String(v); if(/^[=+\-@]/.test(v)) v="'"+v; return '"'+v.replace(/"/g,'""')+'"'; }
+function exportCSV(id){
+  var cs = id ? [find(id)] : S.campaigns, rows=[["Campaign","Donor","Amount (INR)","Date"]];
+  cs.forEach(function(c){ c.donations.forEach(function(d){ rows.push([c.title, d.anon?"Anonymous":d.name, d.amt, d.date]); }); });
+  if(rows.length===1) return toast("No donations to export yet.");
+  var text="\ufeff"+rows.map(function(r){ return r.map(csvCell).join(","); }).join("\r\n");
+  var a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([text],{type:"text/csv;charset=utf-8"}));
+  a.download = "donations_"+(id?id:"all")+"_"+today()+".csv"; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); },1000);
+  log("Donations exported to CSV ("+(id?"“"+find(id).title+"”":"all campaigns")+")"); save(); toast("CSV downloaded.");
+}
+
+/* ---------- Charts page ---------- */
+function charts(){
+  var cs=S.campaigns.filter(function(c){ return c.status!=="rejected"; });
+  if(!cs.length) return '<h2>Charts</h2><div class="empty">No campaigns yet. <a href="#new">Start a campaign</a> to see charts.</div>';
+  // 1. raised vs target
+  var c1=cs.map(function(c){ return '<div class="ch"><div class="t" title="'+esc(c.title)+'">'+esc(c.title)+'</div><div class="bar"><i style="width:'+pct(raised(c),c.goal)+'%"></i></div><div class="v">'+pct(raised(c),c.goal)+'% of '+inr(c.goal)+'</div></div>'; }).join("");
+  // 2. donations per day
+  var by={}; cs.forEach(function(c){ c.donations.forEach(function(d){ by[d.date]=(by[d.date]||0)+d.amt; }); });
+  var days=Object.keys(by).sort(), c2;
+  if(!days.length) c2='<p class="mute">No donations yet.</p>';
+  else {
+    var max=Math.max.apply(null,days.map(function(d){return by[d];})), bw=Math.min(50,480/days.length), gap=bw*0.35, W=Math.max(300,days.length*(bw+gap)+50);
+    c2='<div class="tw"><svg viewBox="0 0 '+W+' 220" width="100%" style="min-width:'+Math.min(W,560)+'px" role="img" aria-label="Donations per day"><line x1="30" y1="180" x2="'+W+'" y2="180" stroke="var(--line)"/>'
+     +days.map(function(d,i){ var h=Math.max(2,by[d]/max*140), x=40+i*(bw+gap);
+        return '<rect x="'+x+'" y="'+(180-h)+'" width="'+bw+'" height="'+h+'" rx="3" style="fill:var(--raised)"/><text x="'+(x+bw/2)+'" y="'+(172-h)+'" text-anchor="middle">'+by[d].toLocaleString("en-IN")+'</text><text x="'+(x+bw/2)+'" y="198" text-anchor="middle">'+d.slice(5)+'</text>'; }).join("")+'</svg></div>';
+  }
+  // 3. where the money stands
+  var c3=cs.map(function(c){ var r=raised(c), s=spentV(c), sp=r?Math.round(s/r*100):0;
+    return '<div class="ch"><div class="t" title="'+esc(c.title)+'">'+esc(c.title)+'</div><div class="bar">'+(r?'<i style="width:100%"></i><b style="width:'+sp+'%"></b>':'')+'</div><div class="v">'+(r?sp+'% spent':'No funds')+'</div></div>'; }).join("");
+  // 4. named vs anonymous
+  var all=[]; cs.forEach(function(c){ all=all.concat(c.donations); });
+  var an=sum(all.filter(function(d){return d.anon;})), nm=sum(all.filter(function(d){return !d.anon;})), tot=an+nm;
+  var c4=tot?'<div class="bar" style="height:16px"><i style="width:100%"></i><b style="width:'+Math.round(an/tot*100)+'%"></b></div><div class="row mute"><span>Anonymous: '+inr(an)+' ('+Math.round(an/tot*100)+'%)</span><span>Named: '+inr(nm)+'</span></div>':'<p class="mute">No donations yet.</p>';
+  return '<h2>Charts</h2><p class="sub">How the money is coming in and how it is being used, across all campaigns.</p>'
+   +'<div class="card"><h3>Progress towards each target</h3>'+c1+'</div>'
+   +'<div class="card" style="margin-top:16px"><h3>Donations per day (₹)</h3>'+c2+'</div>'
+   +'<div class="card" style="margin-top:16px"><h3>How much of the raised money is spent</h3><div class="legend" style="margin-bottom:6px"><span style="--c:var(--spent)">Verified spending</span><span style="--c:var(--raised)">Still in hand</span></div>'+c3+'</div>'
+   +'<div class="card" style="margin-top:16px"><h3>Anonymous and named donations</h3><div class="legend" style="margin-bottom:6px"><span style="--c:var(--spent)">Anonymous</span><span style="--c:var(--raised)">Named</span></div>'+c4+'</div>'
+   +'<p><button class="btn alt" onclick="exportCSV()">Export all donations (CSV)</button></p>';
+}
+
+/* ---------- Router ---------- */
+function route(){
+  var r=(location.hash||"#home").slice(1), app=document.getElementById("app"), c=find(r);
+  nav(c?"home":r);
+  if(c) app.innerHTML=detail(c);
+  else if(r==="new") app.innerHTML=newForm();
+  else if(r==="charts") app.innerHTML=charts();
+  else if(r==="admin") app.innerHTML=admin();
+  else { app.innerHTML=home(); list(); }
+  window.scrollTo(0,0);
+}
+window.addEventListener("hashchange",route);
+route();
